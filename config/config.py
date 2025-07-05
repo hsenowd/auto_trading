@@ -4,6 +4,8 @@
 """
 
 import os
+from datetime import datetime, timedelta
+import pytz
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -135,30 +137,95 @@ LOGGING_CONFIG = {
     "log_file": "logs/trading.log",
 }
 
-# 슬랙 알림 설정
-SLACK_CONFIG = {
-    "webhook_url": os.getenv("SLACK_WEBHOOK_URL", ""),
-    "channel": "#trading-alerts",
-    "username": "ScalpingBot",
+# 텔레그램 알림 설정
+TELEGRAM_CONFIG = {
+    "bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
+    "chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
+    "enabled": bool(os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"),
 }
 
 # =============================================================================
-# 미국 주식 거래 시간 설정 (한국 시간 기준)
+# 미국 주식 거래 시간 설정 (한국 시간 기준, 썸머타임 자동 적용)
 # =============================================================================
 
-# 미국 주식 거래 시간 (한국 시간 기준)
-TRADING_HOURS = {
-    # 동부 표준시 (EST) 기준
-    "market_open": "23:30",    # 09:30 EST = 23:30 KST
-    "market_close": "06:00",   # 16:00 EST = 06:00 KST (다음날)
-    "pre_market_start": "18:00",  # 04:00 EST = 18:00 KST
-    "after_market_end": "10:00",  # 20:00 EST = 10:00 KST (다음날)
-}
+def is_dst_active(date=None):
+    """미국 동부시간 썸머타임 적용 여부 확인"""
+    if date is None:
+        date = datetime.now()
+    
+    year = date.year
+    
+    # DST 시작: 3월 둘째 주 일요일 2:00 AM
+    march_second_sunday = datetime(year, 3, 8)
+    while march_second_sunday.weekday() != 6:  # 일요일: 6
+        march_second_sunday += timedelta(days=1)
+    dst_start = march_second_sunday
+    
+    # DST 종료: 11월 첫째 주 일요일 2:00 AM
+    november_first_sunday = datetime(year, 11, 1)
+    while november_first_sunday.weekday() != 6:  # 일요일: 6
+        november_first_sunday += timedelta(days=1)
+    dst_end = november_first_sunday
+    
+    return dst_start <= date < dst_end
+
+def get_us_market_hours_kr():
+    """한국 시간 기준 미국 시장 시간 반환"""
+    dst_active = is_dst_active()
+    
+    if dst_active:  # 썸머타임 (EDT, UTC-4)
+        # 미국 시간 + 13시간 = 한국 시간
+        return {
+            "pre_market_start": "17:00",    # 4:00 AM EDT = 17:00 KST
+            "market_open": "22:30",         # 9:30 AM EDT = 22:30 KST
+            "market_close": "05:00",        # 4:00 PM EDT = 05:00 KST (다음날)
+            "after_market_end": "09:00",    # 8:00 PM EDT = 09:00 KST (다음날)
+        }
+    else:  # 표준시 (EST, UTC-5)
+        # 미국 시간 + 14시간 = 한국 시간
+        return {
+            "pre_market_start": "18:00",    # 4:00 AM EST = 18:00 KST
+            "market_open": "23:30",         # 9:30 AM EST = 23:30 KST
+            "market_close": "06:00",        # 4:00 PM EST = 06:00 KST (다음날)
+            "after_market_end": "10:00",    # 8:00 PM EST = 10:00 KST (다음날)
+        }
+
+# 동적으로 시장 시간 설정
+TRADING_HOURS = get_us_market_hours_kr()
 
 # 스캘핑 활성 시간 (변동성이 높은 시간대, 한국 시간 기준)
-SCALPING_ACTIVE_HOURS = [
-    ("23:30", "00:30"),  # 장 시작 1시간
-    ("04:00", "06:00"),  # 장 마감 2시간
+def get_scalping_active_hours():
+    """스캘핑 활성 시간 반환 (프리마켓 + 정규시장 + 애프터마켓 포함)"""
+    hours = get_us_market_hours_kr()
+    
+    return [
+        # 프리마켓 (변동성 높은 시간)
+        (hours["pre_market_start"], hours["market_open"]),
+        
+        # 정규 시장 (오픈 1시간 - 높은 변동성)
+        (hours["market_open"], "23:30" if is_dst_active() else "00:30"),
+        
+        # 정규 시장 (마감 2시간 - 높은 변동성) 
+        ("03:00" if is_dst_active() else "04:00", hours["market_close"]),
+        
+        # 애프터마켓 (첫 1시간 - 실적 발표 등)
+        (hours["market_close"], "06:00" if is_dst_active() else "07:00"),
+    ]
+
+SCALPING_ACTIVE_HOURS = get_scalping_active_hours()
+
+# 미국 시장 휴장일 확인을 위한 설정
+US_MARKET_HOLIDAYS = [
+    "New Year's Day",
+    "Martin Luther King Jr. Day", 
+    "Presidents' Day",
+    "Good Friday",
+    "Memorial Day",
+    "Juneteenth",
+    "Independence Day",
+    "Labor Day",
+    "Thanksgiving",
+    "Christmas Day"
 ]
 
 # =============================================================================
@@ -183,3 +250,41 @@ BACKTEST_CONFIG = {
     "commission": 0.001,  # 0.1%
     "slippage": 0.0005,   # 0.05%
 }
+
+# =============================================================================
+# 시장 시간 유틸리티 함수
+# =============================================================================
+
+def is_market_session(time_str=None):
+    """현재 시간이 거래 세션 중인지 확인"""
+    if time_str is None:
+        now = datetime.now()
+        time_str = now.strftime("%H:%M")
+    
+    hours = get_us_market_hours_kr()
+    
+    # 프리마켓부터 애프터마켓까지 전체 시간
+    start_time = hours["pre_market_start"]
+    end_time = hours["after_market_end"]
+    
+    # 시간 비교 (다음날로 넘어가는 경우 고려)
+    if start_time <= end_time:
+        return start_time <= time_str <= end_time
+    else:
+        # 자정을 넘어가는 경우
+        return time_str >= start_time or time_str <= end_time
+
+def get_current_market_session():
+    """현재 시장 세션 반환"""
+    now = datetime.now()
+    time_str = now.strftime("%H:%M")
+    hours = get_us_market_hours_kr()
+    
+    if hours["pre_market_start"] <= time_str < hours["market_open"]:
+        return "PRE_MARKET"
+    elif hours["market_open"] <= time_str < hours["market_close"]:
+        return "REGULAR_MARKET"
+    elif hours["market_close"] <= time_str < hours["after_market_end"]:
+        return "AFTER_MARKET"
+    else:
+        return "CLOSED"

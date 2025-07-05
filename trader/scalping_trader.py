@@ -16,6 +16,7 @@ from utils.logger import get_logger, log_trade, log_error, log_performance
 from utils.api_client import get_alpaca_client
 from analyzer.gpt_analyzer import get_market_analyzer
 from screener.stock_screener import get_stock_screener
+from utils.telegram_notifier import get_telegram_notifier
 
 logger = get_logger()
 
@@ -67,6 +68,7 @@ class ScalpingTrader:
         self.alpaca_client = get_alpaca_client()
         self.market_analyzer = get_market_analyzer()
         self.stock_screener = get_stock_screener()
+        self.telegram_notifier = get_telegram_notifier()
         
         # 거래 설정
         self.config = SCALPING_CONFIG
@@ -84,7 +86,18 @@ class ScalpingTrader:
             "total_profit_loss": 0.0,
             "start_time": datetime.now(),
             "max_drawdown": 0.0,
-            "current_drawdown": 0.0
+            "current_drawdown": 0.0,
+            "positions_opened": 0,
+            "positions_closed": 0,
+            "avg_holding_time": 0.0,
+            "max_profit": 0.0,
+            "max_loss": 0.0,
+            "consecutive_wins": 0,
+            "consecutive_losses": 0,
+            "max_consecutive_wins": 0,
+            "max_consecutive_losses": 0,
+            "trades_by_hour": {},
+            "total_volume": 0
         }
         
         # 거래 실행 제어
@@ -558,8 +571,9 @@ if __name__ == "__main__":
     trader = ScalpingTrader()
     
     # 거래 시작
+    print("거래 시작...")
     if trader.start_trading():
-        print("거래 시작됨")
+        print("✅ 거래 시작 성공")
         
         # 급등주 스크리닝 및 거래
         screener = get_stock_screener()
@@ -586,4 +600,4 @@ if __name__ == "__main__":
         trader.stop_trading()
         print("\n거래 중지됨")
     else:
-        print("거래 시작 실패")
+        print("❌ 거래 시작 실패")

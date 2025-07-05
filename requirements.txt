@@ -27,11 +27,15 @@ aiohttp==3.8.5
 # Configuration
 python-dotenv==1.0.0
 
-# Notifications
-slack-sdk==3.21.3
+# Notifications (Telegram)
+python-telegram-bot==20.7
 
 # WebSocket support
 websockets==11.0.3
 
 # Korean timezone support
 pytz==2024.1
+
+# Market calendar and holidays
+pandas-market-calendars==4.3.3
+holidays==0.39
