@@ -538,6 +538,197 @@ class ScalpingTrader:
             log_error("POSITION_SUMMARY_ERROR", "Failed to get position summary", e)
             return []
 
+    def place_buy_order(self, symbol: str, analysis: Dict) -> bool:
+        """매수 주문 실행 (중소형주 전용 로직)"""
+        try:
+            # 현재가 조회
+            price_data = self.kis_client.get_overseas_stock_price(symbol)
+            if not price_data:
+                logger.error(f"Failed to get price for {symbol}")
+                return False
+            
+            current_price = price_data.get('current_price', 0)
+            if current_price <= 0:
+                logger.error(f"Invalid price for {symbol}: {current_price}")
+                return False
+            
+            # 중소형주 가격 범위 확인 (동전주부터 30달러까지)
+            if not (0.01 <= current_price <= 30.0):
+                logger.warning(f"Price out of range for {symbol}: ${current_price:.3f}")
+                return False
+            
+            # 중소형주 전용 포지션 크기 계산
+            quantity = self.calculate_small_cap_position_size(current_price, analysis)
+            
+            if quantity <= 0:
+                logger.warning(f"Calculated quantity is 0 for {symbol}")
+                return False
+            
+            # 주문 실행
+            order_result = self.kis_client.place_overseas_order(
+                symbol=symbol,
+                side="BUY",
+                quantity=quantity,
+                price=current_price,
+                order_type="MARKET"
+            )
+            
+            if order_result and order_result.get('success', False):
+                # 포지션 정보 저장
+                position_info = {
+                    'symbol': symbol,
+                    'quantity': quantity,
+                    'entry_price': current_price,
+                    'entry_time': datetime.now(),
+                    'order_id': order_result.get('order_id', ''),
+                    'target_price': current_price * (1 + SCALPING_CONFIG["profit_target"]),
+                    'stop_price': current_price * (1 - SCALPING_CONFIG["stop_loss"]),
+                    'analysis': analysis,
+                    'price_range': self.classify_price_range(current_price),
+                    'risk_level': self.assess_position_risk(current_price, quantity)
+                }
+                
+                self.active_positions[symbol] = position_info
+                self.daily_stats["positions_opened"] += 1
+                self.daily_stats["total_volume"] += quantity
+                
+                # 매수 알림 전송 (가격 범위 정보 포함)
+                self.telegram_notifier.send_trade_alert(
+                    symbol=symbol,
+                    action="BUY",
+                    price=current_price,
+                    quantity=quantity,
+                    signal_score=analysis.get('signal_score', 0),
+                    reasoning=f"{analysis.get('reasoning', '')} | 가격범위: {position_info['price_range']} | 리스크: {position_info['risk_level']}"
+                )
+                
+                logger.info(f"✅ BUY order placed: {symbol} x {quantity:,} @ ${current_price:.3f}")
+                logger.info(f"   💰 Total value: ${current_price * quantity:,.2f}")
+                logger.info(f"   🏷️ Price range: {position_info['price_range']}")
+                logger.info(f"   ⚠️ Risk level: {position_info['risk_level']}")
+                return True
+            else:
+                logger.error(f"Failed to place buy order for {symbol}")
+                return False
+                
+        except Exception as e:
+            log_error("BUY_ORDER_ERROR", f"Failed to place buy order for {symbol}", e)
+            return False
+    
+    def calculate_small_cap_position_size(self, price: float, analysis: Dict) -> int:
+        """중소형주 전용 포지션 크기 계산"""
+        try:
+            # 기본 포지션 크기 설정 (가격 범위별 차등)
+            if price < 0.1:
+                # 마이크로 페니 스톡 (0.1달러 미만)
+                max_position_value = 1000
+                min_quantity = 10000
+                max_quantity = 100000
+            elif price < 1.0:
+                # 페니 스톡 (1달러 미만)
+                max_position_value = 3000
+                min_quantity = 3000
+                max_quantity = 50000
+            elif price < 5.0:
+                # 저가주 (5달러 미만)
+                max_position_value = 6000
+                min_quantity = 1000
+                max_quantity = 20000
+            elif price < 15.0:
+                # 중간가 (15달러 미만)
+                max_position_value = 8000
+                min_quantity = 500
+                max_quantity = 10000
+            else:
+                # 고가주 (30달러 이하)
+                max_position_value = 10000
+                min_quantity = 300
+                max_quantity = 5000
+            
+            # GPT 분석 점수 기반 조정
+            signal_score = analysis.get('signal_score', 5)
+            confidence = analysis.get('confidence', 'LOW')
+            
+            if signal_score >= 8.5 and confidence == 'HIGH':
+                position_multiplier = 1.2  # 20% 증가
+            elif signal_score >= 7.5 and confidence in ['HIGH', 'MEDIUM']:
+                position_multiplier = 1.0  # 기본
+            elif signal_score >= 7.0:
+                position_multiplier = 0.8  # 20% 감소
+            else:
+                position_multiplier = 0.5  # 50% 감소
+            
+            max_position_value *= position_multiplier
+            
+            # 수량 계산
+            quantity = int(max_position_value / price)
+            
+            # 최소/최대 수량 제한 적용
+            quantity = max(min_quantity, min(quantity, max_quantity))
+            
+            logger.debug(f"Position size for {price:.3f}: {quantity:,} shares (${quantity * price:,.2f})")
+            
+            return quantity
+            
+        except Exception as e:
+            log_error("POSITION_SIZE_ERROR", f"Error calculating position size for price ${price:.3f}", e)
+            return 1000  # 기본값
+    
+    def classify_price_range(self, price: float) -> str:
+        """가격 범위 분류"""
+        if price < 0.1:
+            return "MICRO_PENNY"      # 0.1달러 미만
+        elif price < 1.0:
+            return "PENNY"            # 1달러 미만
+        elif price < 5.0:
+            return "LOW_PRICE"        # 5달러 미만
+        elif price < 15.0:
+            return "MID_PRICE"        # 15달러 미만
+        elif price <= 30.0:
+            return "HIGH_PRICE"       # 30달러 이하
+        else:
+            return "OVER_LIMIT"       # 30달러 초과
+    
+    def assess_position_risk(self, price: float, quantity: int) -> str:
+        """포지션 리스크 평가"""
+        try:
+            risk_score = 0
+            
+            # 가격 기반 리스크
+            if price < 0.1:
+                risk_score += 3  # 매우 높음 (마이크로 페니)
+            elif price < 1.0:
+                risk_score += 2  # 높음 (페니 스톡)
+            elif price < 5.0:
+                risk_score += 1  # 보통 (저가주)
+            
+            # 포지션 크기 기반 리스크
+            position_value = price * quantity
+            if position_value > 8000:
+                risk_score += 1
+            elif position_value > 5000:
+                risk_score += 0.5
+            
+            # 수량 기반 리스크 (유동성 우려)
+            if quantity > 50000:
+                risk_score += 1
+            elif quantity > 20000:
+                risk_score += 0.5
+            
+            # 리스크 레벨 분류
+            if risk_score >= 4:
+                return "VERY_HIGH"
+            elif risk_score >= 2.5:
+                return "HIGH"
+            elif risk_score >= 1:
+                return "MEDIUM"
+            else:
+                return "LOW"
+                
+        except Exception as e:
+            log_error("RISK_ASSESSMENT_ERROR", f"Error assessing position risk", e)
+            return "HIGH"
+
 
 # 전역 트레이더 인스턴스
 scalping_trader = ScalpingTrader()

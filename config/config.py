@@ -56,11 +56,15 @@ SCALPING_CONFIG = {
 
 # 급등주 스크리닝 조건
 SCREENING_CONFIG = {
-    "min_volume": 1000000,       # 최소 거래량
-    "min_price": 5.0,            # 최소 주가 (USD)
-    "max_price": 500.0,          # 최대 주가 (USD)
+    "min_volume": 1000000,       # 최소 거래량 (1M 이상)
+    "min_price": 0.01,           # 최소 주가 (동전주부터)
+    "max_price": 30.0,           # 최대 주가 (30달러 이하 중소형주)
     "gap_threshold": 0.03,       # 갭 상승 임계값 (3%)
     "volume_spike": 2.0,         # 거래량 급증 배수
+    "exclude_etf": True,         # ETF 제외
+    "exclude_index": True,       # 지수 제외
+    "exclude_futures": True,     # 선물 제외
+    "market_cap_max": 10000000000,  # 최대 시가총액 100억달러 (중소형주)
 }
 
 # =============================================================================
