@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-미국 주식 초단타 스캘핑 자동매매 시스템
+한국투자 Open API 기반 미국 주식 초단타 스캘핑 자동매매 시스템
 GPT 분석 기반 실시간 거래 시스템
 
 실행 방법:
@@ -16,7 +16,7 @@ from typing import Dict, List
 
 from config.config import SCALPING_ACTIVE_HOURS, TRADING_HOURS
 from utils.logger import get_logger
-from utils.api_client import get_alpaca_client
+from utils.api_client import get_kis_client
 from screener.stock_screener import get_stock_screener
 from analyzer.gpt_analyzer import get_market_analyzer
 from trader.scalping_trader import get_scalping_trader
@@ -29,7 +29,7 @@ class ScalpingSystem:
     """스캘핑 시스템 메인 클래스"""
     
     def __init__(self):
-        self.alpaca_client = get_alpaca_client()
+        self.kis_client = get_kis_client()
         self.stock_screener = get_stock_screener()
         self.market_analyzer = get_market_analyzer()
         self.scalping_trader = get_scalping_trader()
@@ -54,7 +54,7 @@ class ScalpingSystem:
         """시스템 시작"""
         try:
             logger.info("=" * 60)
-            logger.info("🚀 미국 주식 초단타 스캘핑 자동매매 시스템 시작")
+            logger.info("🚀 한국투자 API 기반 미국 주식 초단타 스캘핑 자동매매 시스템 시작")
             logger.info("=" * 60)
             
             # 시스템 상태 확인
@@ -79,18 +79,22 @@ class ScalpingSystem:
         try:
             logger.info("Performing system health check...")
             
-            # API 연결 확인
-            if not self.alpaca_client.is_market_open():
+            # KIS API 인증 확인
+            if not self.kis_client.authenticate():
+                logger.error("Failed to authenticate with KIS API")
+                return False
+            
+            # 시장 상태 확인
+            if not self.kis_client.is_market_open():
                 logger.warning("Market is currently closed")
             
             # 계좌 상태 확인
-            account = self.alpaca_client.get_account()
-            if not account:
-                logger.error("Failed to connect to Alpaca API")
+            balance_result = self.kis_client.get_overseas_stock_balance()
+            if not balance_result:
+                logger.error("Failed to get account balance")
                 return False
             
-            logger.info(f"Account Value: ${float(account.get('portfolio_value', 0)):,.2f}")
-            logger.info(f"Buying Power: ${float(account.get('buying_power', 0)):,.2f}")
+            logger.info("✅ KIS API connection successful")
             
             # GPT API 확인 (간단한 테스트)
             try:
@@ -104,7 +108,7 @@ class ScalpingSystem:
                 }
                 analysis = self.market_analyzer.openai_client.analyze_entry_signal("TEST", test_data)
                 if analysis:
-                    logger.info("GPT API connection successful")
+                    logger.info("✅ GPT API connection successful")
                 
             except Exception as e:
                 logger.warning(f"GPT API test failed: {e}")
@@ -120,8 +124,8 @@ class ScalpingSystem:
     def setup_schedule(self):
         """스케줄 설정"""
         try:
-            # 장 시작 전 준비
-            schedule.every().day.at("09:15").do(self.pre_market_setup)
+            # 장 시작 전 준비 (한국 시간 기준)
+            schedule.every().day.at("23:15").do(self.pre_market_setup)
             
             # 스캘핑 활성 시간 설정
             for start_time, end_time in SCALPING_ACTIVE_HOURS:
@@ -132,8 +136,8 @@ class ScalpingSystem:
             schedule.every(5).minutes.do(self.periodic_screening)
             schedule.every(1).minutes.do(self.monitor_system)
             
-            # 장 마감 후 정리
-            schedule.every().day.at("16:30").do(self.post_market_cleanup)
+            # 장 마감 후 정리 (한국 시간 기준)
+            schedule.every().day.at("06:30").do(self.post_market_cleanup)
             
             logger.info("Scheduled tasks configured")
             
@@ -195,7 +199,7 @@ class ScalpingSystem:
     def start_scalping_session(self):
         """스캘핑 세션 시작"""
         try:
-            if not self.alpaca_client.is_market_open():
+            if not self.kis_client.is_market_open():
                 logger.warning("Market is closed, skipping scalping session")
                 return
             
@@ -339,6 +343,11 @@ class ScalpingSystem:
         """수동 모드 실행 (테스트용)"""
         try:
             logger.info("🔧 Running in manual mode")
+            
+            # KIS API 인증
+            if not self.kis_client.authenticate():
+                logger.error("Failed to authenticate with KIS API")
+                return
             
             # 급등주 스크리닝
             logger.info("Screening stocks...")

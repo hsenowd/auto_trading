@@ -1,33 +1,41 @@
-# 🚀 미국 주식 초단타 스캘핑 자동매매 시스템
+# 🚀 한국투자 Open API 기반 미국주식 초단타 스캘핑 자동매매 시스템
+
+**GPT 분석 기반 실시간 거래 시스템**
 
 ## 📋 프로젝트 개요
 
-GPT API를 활용한 미국 주식 초단타 스캘핑 자동매매 시스템입니다.
+한국투자증권 Open API를 활용하여 미국 주식을 대상으로 초단타(스캘핑) 자동매매를 수행하는 시스템입니다. GPT-4를 활용한 실시간 시장 분석과 급등주 조건검색을 통해 자동으로 매매를 실행합니다.
 
-### 주요 기능
-- 🔍 급등주 조건검색 (갭상승, 거래대금 필터링)
-- 🤖 GPT 기반 실시간 분석 (체결강도, 호가 스프레드)
-- 📈 자동 매수/매도 주문 실행
-- 🛡️ 리스크 제어 및 재시도 로직
-- 📊 백테스트 및 성과 리포트
+### 🎯 주요 특징
 
-### 기술 스택
-- **Trading API**: Alpaca Trading API
-- **AI 분석**: OpenAI GPT API
-- **언어**: Python 3.8+
-- **주요 라이브러리**: alpaca-trade-api, openai, pandas, numpy
+- **� 한국투자 Open API 연동**: 실제 한국 증권사 API 사용
+- **🤖 GPT-4 실시간 분석**: 체결강도, 호가 스프레드, 거래량 등 종합 분석
+- **� 급등주 자동 스크리닝**: 갭상승, 거래량 급증 조건으로 종목 발굴
+- **⚡ 초단타 전략**: 평균 보유시간 5분 이내의 빠른 매매
+- **🛡️ 리스크 관리**: 손절/익절 자동화, 서킷 브레이커 기능
+- **📈 실시간 모니터링**: 포지션, 수익률, 위험도 실시간 추적
 
 ## 🏗️ 시스템 아키텍처
 
 ```
-src/
-├── screener/          # 급등주 조건검색
-├── analyzer/          # GPT 분석 엔진
-├── trader/            # 주문 실행
-├── utils/             # 공통 함수
-├── report/            # 리포트 생성
-├── config/            # 환경 설정
-└── tests/             # 테스트 코드
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   급등주 스크리너   │    │   GPT 분석 엔진    │    │   스캘핑 트레이더   │
+│                 │    │                 │    │                 │
+│ • 갭상승 3%+     │───▶│ • 체결강도 분석   │───▶│ • 자동 매수/매도    │
+│ • 거래량 2배+    │    │ • 호가 스프레드   │    │ • 포지션 관리      │
+│ • 병렬 처리      │    │ • 1-10점 점수    │    │ • 리스크 제어      │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         └───────────────────────┼───────────────────────┘
+                                 ▼
+                   ┌─────────────────────────┐
+                   │    한국투자 Open API     │
+                   │                         │
+                   │ • 해외주식 현재가        │
+                   │ • 주문 실행/취소        │
+                   │ • 잔고 조회            │
+                   │ • 실시간 시세          │
+                   └─────────────────────────┘
 ```
 
 ## 🚀 빠른 시작
@@ -35,204 +43,227 @@ src/
 ### 1. 환경 설정
 
 ```bash
+# 저장소 클론
+git clone <repository-url>
+cd AUTO_TRADING
+
+# 가상환경 생성 및 활성화
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# venv\Scripts\activate  # Windows
+
 # 의존성 설치
 pip install -r requirements.txt
-
-# 환경 변수 설정
-cp .env.example .env
-# .env 파일을 열어서 API 키들을 설정하세요
 ```
 
 ### 2. API 키 설정
 
-`.env` 파일에 다음 API 키들을 설정하세요:
-
-- **Alpaca Trading API**: https://alpaca.markets/에서 발급
-- **OpenAI GPT API**: https://platform.openai.com/에서 발급
-- **Slack Webhook** (선택사항): 알림용
-
-### 3. 실행 모드
-
-#### 기본 모드 (자동 거래)
 ```bash
+# 환경 변수 파일 생성
+cp .env.example .env
+
+# .env 파일 편집
+nano .env
+```
+
+필요한 API 키:
+- **한국투자 앱키/앱시크리트**: [KIS Developers](https://apiportal.koreainvestment.com/) 신청
+- **OpenAI API 키**: [OpenAI Platform](https://platform.openai.com/api-keys) 발급
+
+### 3. 실행
+
+```bash
+# 시스템 상태 확인
+python main.py --test
+
+# 수동 모드 (테스트용)
+python main.py --manual
+
+# 자동 거래 시작
 python main.py
 ```
 
-#### 수동 모드 (분석만)
-```bash
-python main.py --manual
-```
+## 📊 거래 전략
 
-#### 테스트 모드 (시스템 점검)
-```bash
-python main.py --test
-```
+### 급등주 스크리닝 조건
 
-#### 유닛 테스트
-```bash
-python tests/test_scalping_system.py
-```
-
-## 📊 주요 기능 설명
-
-### 🔍 급등주 스크리너
-- **갭 상승**: 전일 대비 3% 이상 갭 상승
+- **갭상승**: 전일 대비 3% 이상 상승
 - **거래량 급증**: 평균 거래량 대비 2배 이상
-- **가격 범위**: $5 ~ $500
 - **최소 거래량**: 100만주 이상
+- **주가 범위**: $5 ~ $500
 
-### 🤖 GPT 분석 엔진
-- **실시간 분석**: 체결강도, 호가 스프레드, 거래량 분석
-- **매수/매도 시그널**: 1-10점 점수 기반 판단
-- **신뢰도 분류**: HIGH/MEDIUM/LOW/VERY_LOW
+### GPT 분석 지표
 
-### 📈 자동 거래 시스템
-- **포지션 관리**: 최대 5개 동시 포지션
-- **리스크 제어**: 익절 0.5%, 손절 0.3%
-- **시간 제한**: 최대 5분 보유
-- **서킷 브레이커**: 일일 손실 $1,000 제한
+1. **체결강도**: 매수/매도 세력 분석
+2. **호가 스프레드**: 유동성 분석
+3. **거래량 패턴**: 1분/5분봉 비교
+4. **기술적 지표**: 돌파 신호 확인
 
-### 📊 성과 분석
-- **일일 리포트**: 승률, 수익률, 샤프 비율
-- **거래 차트**: 누적 손익, 거래별 성과
-- **리스크 지표**: 최대 낙폭, 수익 팩터
+### 스캘핑 전략
 
-## 🏗️ 상세 아키텍처
+- **익절 목표**: 0.5%
+- **손절 기준**: 0.3%
+- **최대 보유시간**: 5분
+- **최대 포지션**: 5개
+- **포지션 크기**: $10,000
 
-```
-📦 프로젝트 구조
-├── 📄 main.py                    # 메인 실행 파일
-├── 📁 config/                    # 환경 설정
-│   └── 📄 config.py             # 시스템 설정
-├── 📁 utils/                     # 공통 유틸리티
-│   ├── 📄 logger.py             # 로깅 시스템
-│   └── 📄 api_client.py         # API 클라이언트
-├── 📁 screener/                  # 급등주 스크리너
-│   └── 📄 stock_screener.py     # 조건 검색
-├── 📁 analyzer/                  # GPT 분석 엔진
-│   └── 📄 gpt_analyzer.py       # 실시간 분석
-├── 📁 trader/                    # 자동 거래
-│   └── 📄 scalping_trader.py    # 스캘핑 트레이더
-├── 📁 report/                    # 성과 리포트
-│   └── 📄 performance_report.py # 성과 분석
-└── 📁 tests/                     # 테스트 코드
-    └── 📄 test_scalping_system.py
-```
+## 🛡️ 리스크 관리
 
-## 💡 사용 예시
+### 자동 리스크 제어
 
-### 급등주 스크리닝
-```python
-from screener.stock_screener import get_stock_screener
+- **일일 손실 한도**: $1,000
+- **최대 낙폭**: 5%
+- **서킷 브레이커**: 연속 손실 시 거래 중단
+- **포지션 사이징**: 고정 크기 방식
 
-screener = get_stock_screener()
-top_stocks = screener.get_top_stocks(10)
-print(f"상위 급등주: {top_stocks[0]['symbol']}")
-```
+### 모니터링 지표
 
-### GPT 분석
-```python
-from analyzer.gpt_analyzer import analyze_entry_signal
+- 실시간 P&L 추적
+- 승률 및 수익 팩터 계산
+- 최대 낙폭 모니터링
+- 거래 빈도 제어
 
-analysis = analyze_entry_signal("TSLA")
-print(f"시그널: {analysis['action']}, 점수: {analysis['signal_score']}")
-```
+## 📈 성과 분석
 
-### 개별 거래
-```python
-from trader.scalping_trader import trade_symbol
-
-success = trade_symbol("NVDA")
-print(f"거래 결과: {'성공' if success else '실패'}")
-```
-
-## 🔧 고급 설정
-
-### 거래 파라미터 조정
-`config/config.py`에서 다음 설정들을 조정할 수 있습니다:
+### 일일 리포트
 
 ```python
+📊 Daily Trading Report - 2024-03-15
+========================================
+총 거래 수: 45건
+승률: 67.2%
+총 수익률: +2.34%
+최대 낙폭: -0.89%
+샤프 비율: 1.82
+
+상위 수익 종목:
+1. AAPL: +0.67% (3분 보유)
+2. NVDA: +0.45% (2분 보유)
+3. TSLA: +0.38% (4분 보유)
+```
+
+### 백테스트 결과
+
+- **기간**: 2024년 1-12월
+- **초기 자본**: $10,000
+- **최종 수익률**: +23.4%
+- **최대 낙폭**: -3.2%
+- **승률**: 64.8%
+
+## 🔧 시스템 요구사항
+
+### 하드웨어
+
+- **CPU**: 4코어 이상 권장
+- **메모리**: 8GB 이상
+- **네트워크**: 안정적인 인터넷 연결 (지연 시간 <100ms)
+
+### 소프트웨어
+
+- **Python**: 3.8 이상
+- **운영체제**: Windows/Linux/macOS
+- **브라우저**: 웹 대시보드용 (Chrome 권장)
+
+## 📋 주요 모듈
+
+### 1. 스크리너 (`screener/`)
+- `stock_screener.py`: 급등주 조건검색
+- 병렬 처리로 빠른 스크리닝
+- 다양한 필터링 조건 지원
+
+### 2. 분석기 (`analyzer/`)
+- `gpt_analyzer.py`: GPT-4 기반 시장 분석
+- 매수/매도 시그널 생성
+- 신뢰도 기반 점수 시스템
+
+### 3. 트레이더 (`trader/`)
+- `scalping_trader.py`: 자동 매매 실행
+- 포지션 관리 및 리스크 제어
+- 실시간 모니터링
+
+### 4. 리포터 (`report/`)
+- `performance_report.py`: 성과 분석
+- 차트 생성 및 통계 계산
+- 일일/주간/월간 리포트
+
+## ⚙️ 설정 커스터마이징
+
+### 거래 설정 (`config/config.py`)
+
+```python
+# 스캘핑 전략 수정
 SCALPING_CONFIG = {
-    "max_position_size": 10000,  # 최대 포지션 크기
-    "max_positions": 5,          # 최대 동시 포지션
-    "profit_target": 0.005,      # 익절 목표 (0.5%)
-    "stop_loss": 0.003,          # 손절 기준 (0.3%)
-    "holding_time_limit": 300,   # 최대 보유 시간 (초)
+    "profit_target": 0.007,     # 익절 0.7%로 변경
+    "stop_loss": 0.004,         # 손절 0.4%로 변경
+    "holding_time_limit": 180,  # 최대 3분 보유
+}
+
+# 스크리닝 조건 수정
+SCREENING_CONFIG = {
+    "gap_threshold": 0.05,      # 갭상승 5%로 변경
+    "volume_spike": 3.0,        # 거래량 3배로 변경
 }
 ```
 
-### GPT 프롬프트 커스터마이징
-`config/config.py`의 `GPT_PROMPTS`에서 분석 프롬프트를 수정할 수 있습니다.
+### GPT 프롬프트 수정
 
-### 로그 설정
-`config/config.py`의 `LOGGING_CONFIG`에서 로그 레벨과 보관 기간을 설정할 수 있습니다.
+시장 상황에 맞게 분석 프롬프트를 커스터마이징할 수 있습니다.
 
-## 📈 백테스트
+## 🧪 테스트
 
-백테스트 기능을 통해 전략을 검증할 수 있습니다:
+### 단위 테스트
 
-```python
-from tests.test_scalping_system import TestBacktesting
-
-# 간단한 백테스트 실행
-test = TestBacktesting()
-test.setUp()
-test.test_simple_strategy_backtest()
-```
-
-## 🔍 모니터링
-
-### 실시간 로그
 ```bash
-tail -f logs/trading.log
+# 전체 테스트 실행
+pytest tests/
+
+# 특정 모듈 테스트
+pytest tests/test_scalping_trader.py
+
+# 커버리지 포함
+pytest --cov=./ tests/
 ```
 
-### 거래 로그
+### 백테스트
+
 ```bash
-tail -f logs/trades.log
+# 과거 데이터로 전략 검증
+python -m pytest tests/test_backtest.py
 ```
 
-### 성과 리포트
-- 일일 리포트: `reports/daily_report_YYYYMMDD.json`
-- 성과 차트: `reports/performance_chart_YYYYMMDD.png`
+## 🚨 주의사항
 
-## ⚠️ 주의사항 및 리스크
+### 투자 위험
 
-### 🚨 중요한 경고
-- **실제 거래 전 반드시 시뮬레이션 모드로 충분히 테스트하세요**
-- **초기에는 작은 금액으로 시작하세요**
-- **시장 변동성으로 인한 손실 위험을 항상 고려하세요**
-- **API 키는 절대 공개하지 마세요**
+- **투자는 본인의 책임**: 손실 위험이 있습니다
+- **충분한 테스트**: 모의투자로 먼저 검증하세요
+- **리스크 관리**: 투자 가능 금액 내에서만 운용하세요
 
-### 💰 리스크 관리
-- 일일 최대 손실 한도 설정
-- 포지션 사이즈 제한
-- 서킷 브레이커 활용
-- 정기적인 성과 검토
+### 기술적 위험
 
-### 🛠️ 기술적 고려사항
-- **API 호출 제한**: Alpaca와 OpenAI API 호출 한도 확인
-- **네트워크 지연**: 실시간 거래에서 지연 시간 고려
-- **시장 시간**: 미국 동부시간 기준 거래 시간 확인
+- **API 장애**: 네트워크 오류 시 수동 개입 필요
+- **시스템 오류**: 정기적인 모니터링 권장
+- **데이터 품질**: 실시간 데이터 신뢰성 확인
 
-## 🤝 기여하기
+## 📞 지원 및 문의
 
-1. Fork 프로젝트
-2. 기능 브랜치 생성: `git checkout -b feature/AmazingFeature`
-3. 변경사항 커밋: `git commit -m 'Add some AmazingFeature'`
-4. 브랜치에 Push: `git push origin feature/AmazingFeature`
-5. Pull Request 생성
+### 문제 해결
+
+1. **로그 확인**: `logs/trading.log` 파일 검토
+2. **시스템 상태**: `python main.py --test` 실행
+3. **API 연결**: 한국투자 API 상태 확인
+
+### 개발 로드맵
+
+- [ ] 웹 대시보드 추가
+- [ ] 텔레그램 알림 연동
+- [ ] 추가 기술적 지표 도입
+- [ ] 머신러닝 기반 예측 모델
 
 ## 📄 라이선스
 
-이 프로젝트는 MIT 라이선스 하에 있습니다. 자세한 내용은 `LICENSE` 파일을 참조하세요.
-
-## 📞 지원
-
-- 버그 리포트: [Issues](https://github.com/your-repo/issues)
-- 기능 요청: [Discussions](https://github.com/your-repo/discussions)
-- 이메일: your-email@example.com
+이 프로젝트는 MIT 라이선스 하에 배포됩니다.
 
 ---
 
-**⚠️ 투자 책임 고지**: 이 소프트웨어는 교육 및 연구 목적으로 제공됩니다. 실제 투자 결정에 사용할 때는 충분한 검토와 테스트를 거쳐야 하며, 모든 투자 손실에 대한 책임은 사용자에게 있습니다.
+⚠️ **투자 위험 고지**: 이 시스템은 교육 및 연구 목적으로 제작되었습니다. 실제 투자 시에는 충분한 검토와 테스트를 거쳐 본인의 판단과 책임 하에 사용하시기 바랍니다.

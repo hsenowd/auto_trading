@@ -1,20 +1,23 @@
 """
-API 클라이언트 유틸리티 모듈
-Alpaca API와 OpenAI API 연동을 관리합니다.
+한국투자 Open API 클라이언트 유틸리티 모듈
+한국투자 Open API와 OpenAI API 연동을 관리합니다.
 """
 
 import time
 import json
-import openai
-import alpaca_trade_api as tradeapi
+import copy
+import requests
+import yaml
+import hashlib
+import hmac
 from typing import Dict, List, Optional, Any
 from functools import wraps
 from datetime import datetime, timedelta
+from collections import namedtuple
+from openai import OpenAI
+import os
 
-from config.config import (
-    ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL,
-    OPENAI_API_KEY, GPT_CONFIG
-)
+from config.config import KIS_CONFIG, OPENAI_API_KEY, GPT_CONFIG
 from utils.logger import get_logger, log_error
 
 logger = get_logger()
@@ -39,115 +42,306 @@ def retry_on_failure(max_retries: int = 3, delay: float = 1.0):
     return decorator
 
 
-class AlpacaClient:
-    """Alpaca Trading API 클라이언트"""
+class KISAPIClient:
+    """한국투자 Open API 클라이언트"""
     
     def __init__(self):
-        self.api = tradeapi.REST(
-            ALPACA_API_KEY,
-            ALPACA_SECRET_KEY,
-            ALPACA_BASE_URL,
-            api_version='v2'
-        )
-        self.data_api = tradeapi.REST(
-            ALPACA_API_KEY,
-            ALPACA_SECRET_KEY,
-            ALPACA_BASE_URL,
-            api_version='v2'
-        )
-        logger.info("Alpaca API client initialized")
+        self.config = KIS_CONFIG
+        self.base_url = self.config["vps_url"] if self.config["is_paper_trading"] else self.config["prod_url"]
+        self.app_key = self.config["paper_app_key"] if self.config["is_paper_trading"] else self.config["app_key"]
+        self.app_secret = self.config["paper_app_secret"] if self.config["is_paper_trading"] else self.config["app_secret"]
+        self.account_no = self.config["account_no"]
+        self.product_code = self.config["product_code"]
+        
+        # 토큰 관리
+        self.token = None
+        self.token_expired = None
+        self.last_auth_time = None
+        
+        # 기본 헤더
+        self.base_headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/plain",
+            "charset": "UTF-8",
+            "User-Agent": self.config["user_agent"]
+        }
+        
+        logger.info("KIS API client initialized")
     
-    @retry_on_failure(max_retries=3, delay=1.0)
-    def get_account(self) -> Dict:
-        """계좌 정보 조회"""
-        return self.api.get_account()._raw
-    
-    @retry_on_failure(max_retries=3, delay=1.0)
-    def get_positions(self) -> List[Dict]:
-        """포지션 정보 조회"""
-        positions = self.api.list_positions()
-        return [pos._raw for pos in positions]
-    
-    @retry_on_failure(max_retries=3, delay=1.0)
-    def get_orders(self, status: str = "open") -> List[Dict]:
-        """주문 내역 조회"""
-        orders = self.api.list_orders(status=status)
-        return [order._raw for order in orders]
-    
-    @retry_on_failure(max_retries=3, delay=1.0)
-    def place_order(self, symbol: str, qty: int, side: str, 
-                   type: str = "market", time_in_force: str = "gtc",
-                   limit_price: Optional[float] = None) -> Dict:
-        """주문 실행"""
-        order = self.api.submit_order(
-            symbol=symbol,
-            qty=qty,
-            side=side,
-            type=type,
-            time_in_force=time_in_force,
-            limit_price=limit_price
-        )
-        return order._raw
-    
-    @retry_on_failure(max_retries=3, delay=1.0)
-    def cancel_order(self, order_id: str) -> bool:
-        """주문 취소"""
+    def save_token(self, token: str, expired: str):
+        """토큰을 파일에 저장"""
         try:
-            self.api.cancel_order(order_id)
-            return True
+            valid_date = datetime.strptime(expired, '%Y-%m-%d %H:%M:%S')
+            token_data = {
+                'token': token,
+                'valid-date': valid_date
+            }
+            
+            os.makedirs(os.path.dirname(self.config["token_file_path"]), exist_ok=True)
+            with open(self.config["token_file_path"], 'w', encoding='utf-8') as f:
+                yaml.dump(token_data, f, default_flow_style=False, allow_unicode=True)
+                
         except Exception as e:
-            log_error("ORDER_CANCEL_FAILED", f"Failed to cancel order {order_id}", e)
+            logger.error(f"Failed to save token: {e}")
+    
+    def read_token(self) -> Optional[str]:
+        """저장된 토큰 읽기"""
+        try:
+            if not os.path.exists(self.config["token_file_path"]):
+                return None
+            
+            with open(self.config["token_file_path"], encoding='UTF-8') as f:
+                token_data = yaml.load(f, Loader=yaml.FullLoader)
+            
+            if not token_data:
+                return None
+                
+            # 토큰 만료 시간 확인
+            exp_dt = datetime.strftime(token_data['valid-date'], '%Y-%m-%d %H:%M:%S')
+            now_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            if exp_dt > now_dt:
+                return token_data['token']
+            else:
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to read token: {e}")
+            return None
+    
+    @retry_on_failure(max_retries=3, delay=1.0)
+    def authenticate(self) -> bool:
+        """토큰 발급 및 인증"""
+        try:
+            # 기존 토큰 확인
+            saved_token = self.read_token()
+            if saved_token:
+                self.token = saved_token
+                self.setup_headers()
+                logger.info("Using saved token")
+                return True
+            
+            # 새 토큰 발급
+            url = f"{self.base_url}/oauth2/tokenP"
+            data = {
+                "grant_type": "client_credentials",
+                "appkey": self.app_key,
+                "appsecret": self.app_secret
+            }
+            
+            response = requests.post(url, data=json.dumps(data), headers=self.base_headers)
+            
+            if response.status_code == 200:
+                result = response.json()
+                self.token = result['access_token']
+                self.token_expired = result['access_token_token_expired']
+                
+                # 토큰 저장
+                self.save_token(self.token, self.token_expired)
+                
+                # 헤더 설정
+                self.setup_headers()
+                
+                self.last_auth_time = datetime.now()
+                logger.info("Token authentication successful")
+                return True
+            else:
+                logger.error(f"Token authentication failed: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Authentication error: {e}")
             return False
     
-    @retry_on_failure(max_retries=3, delay=1.0)
-    def get_latest_bars(self, symbols: List[str], timeframe: str = "1Min") -> Dict:
-        """최신 바 데이터 조회"""
-        bars = self.data_api.get_bars(
-            symbols,
-            timeframe,
-            start=datetime.now() - timedelta(days=1),
-            end=datetime.now(),
-            asof=None,
-            feed=None,
-            page_token=None,
-            limit=100
-        )
-        return bars.df.to_dict()
+    def setup_headers(self):
+        """인증 헤더 설정"""
+        self.base_headers["authorization"] = f"Bearer {self.token}"
+        self.base_headers["appkey"] = self.app_key
+        self.base_headers["appsecret"] = self.app_secret
+    
+    def get_hashkey(self, params: Dict) -> str:
+        """해시키 생성"""
+        try:
+            url = f"{self.base_url}/uapi/hashkey"
+            headers = copy.deepcopy(self.base_headers)
+            
+            response = requests.post(url, data=json.dumps(params), headers=headers)
+            
+            if response.status_code == 200:
+                return response.json()['HASH']
+            else:
+                logger.error(f"Failed to get hashkey: {response.status_code}")
+                return ""
+                
+        except Exception as e:
+            logger.error(f"Hashkey generation error: {e}")
+            return ""
+    
+    def api_call(self, endpoint: str, tr_id: str, params: Optional[Dict] = None, method: str = "GET") -> Dict:
+        """API 호출 공통 메서드"""
+        try:
+            # 인증 확인
+            if not self.token:
+                if not self.authenticate():
+                    raise Exception("Authentication failed")
+            
+            url = f"{self.base_url}{endpoint}"
+            headers = copy.deepcopy(self.base_headers)
+            
+            # TR ID 설정 (모의투자일 경우 변환)
+            if tr_id[0] in ('T', 'J', 'C') and self.config["is_paper_trading"]:
+                tr_id = 'V' + tr_id[1:]
+            
+            headers["tr_id"] = tr_id
+            headers["custtype"] = "P"
+            
+            # API 호출
+            if method == "POST":
+                request_data = json.dumps(params) if params else "{}"
+                response = requests.post(url, headers=headers, data=request_data)
+            else:
+                response = requests.get(url, headers=headers, params=params)
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.error(f"API call failed: {response.status_code}, {response.text}")
+                return {}
+                
+        except Exception as e:
+            logger.error(f"API call error: {e}")
+            return {}
+    
+    # =============================================================================
+    # 해외주식 관련 API
+    # =============================================================================
     
     @retry_on_failure(max_retries=3, delay=1.0)
-    def get_latest_quotes(self, symbols: List[str]) -> Dict:
-        """최신 호가 데이터 조회"""
-        quotes = self.data_api.get_latest_quotes(symbols)
-        return {symbol: quote._raw for symbol, quote in quotes.items()}
+    def get_overseas_stock_price(self, symbol: str, exchange: str = "NASD") -> Dict:
+        """해외주식 현재가 조회"""
+        endpoint = "/uapi/overseas-price/v1/quotations/price"
+        tr_id = "HHDFS00000300"
+        
+        params = {
+            "AUTH": "",
+            "EXCD": exchange,  # NASD: 나스닥, NYSE: 뉴욕증권거래소
+            "SYMB": symbol
+        }
+        
+        return self.api_call(endpoint, tr_id, params)
     
     @retry_on_failure(max_retries=3, delay=1.0)
-    def get_latest_trades(self, symbols: List[str]) -> Dict:
-        """최신 체결 데이터 조회"""
-        trades = self.data_api.get_latest_trades(symbols)
-        return {symbol: trade._raw for symbol, trade in trades.items()}
+    def get_overseas_stock_balance(self) -> Dict:
+        """해외주식 잔고 조회"""
+        endpoint = "/uapi/overseas-stock/v1/trading/inquire-balance"
+        tr_id = "TTTS3012R"
+        
+        params = {
+            "CANO": self.account_no,
+            "ACNT_PRDT_CD": self.product_code,
+            "OVRS_EXCG_CD": "NASD",  # 나스닥
+            "TR_CRCY_CD": "USD",
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": ""
+        }
+        
+        return self.api_call(endpoint, tr_id, params)
+    
+    @retry_on_failure(max_retries=3, delay=1.0)
+    def place_overseas_order(self, symbol: str, qty: int, side: str, price: Optional[float] = None, 
+                            exchange: str = "NASD", order_type: str = "00") -> Dict:
+        """해외주식 주문"""
+        endpoint = "/uapi/overseas-stock/v1/trading/order"
+        tr_id = "TTTT1002U"  # 해외주식 주문
+        
+        params = {
+            "CANO": self.account_no,
+            "ACNT_PRDT_CD": self.product_code,
+            "OVRS_EXCG_CD": exchange,
+            "PDNO": symbol,
+            "ORD_QTY": str(qty),
+            "OVRS_ORD_UNPR": str(price) if price is not None else "0",
+            "ORD_SVR_DVSN_CD": "0",
+            "SLL_TYPE": "00" if side == "buy" else "01",
+            "ORD_DVSN": order_type,  # 00: 지정가, 01: 시장가
+            "CTAC_TLNO": "",
+            "MGCO_APTM_ODNO": "",
+            "ORD_SVR_DVSN_CD": "0"
+        }
+        
+        # 해시키 생성
+        hashkey = self.get_hashkey(params)
+        headers = copy.deepcopy(self.base_headers)
+        headers["hashkey"] = hashkey
+        
+        return self.api_call(endpoint, tr_id, params, method="POST")
+    
+    @retry_on_failure(max_retries=3, delay=1.0)
+    def cancel_overseas_order(self, order_id: str, symbol: str, qty: int, exchange: str = "NASD") -> Dict:
+        """해외주식 주문 취소"""
+        endpoint = "/uapi/overseas-stock/v1/trading/order-rvsecncl"
+        tr_id = "TTTT1004U"
+        
+        params = {
+            "CANO": self.account_no,
+            "ACNT_PRDT_CD": self.product_code,
+            "OVRS_EXCG_CD": exchange,
+            "PDNO": symbol,
+            "ORGN_ODNO": order_id,
+            "ORD_QTY": str(qty),
+            "RVSE_CNCL_DVSN_CD": "02",  # 취소
+            "ORD_UNPR": "0",
+            "CTAC_TLNO": "",
+            "MGCO_APTM_ODNO": ""
+        }
+        
+        return self.api_call(endpoint, tr_id, params, method="POST")
+    
+    @retry_on_failure(max_retries=3, delay=1.0)
+    def get_overseas_orders(self) -> Dict:
+        """해외주식 미체결 주문 조회"""
+        endpoint = "/uapi/overseas-stock/v1/trading/inquire-nccs"
+        tr_id = "TTTS3018R"
+        
+        params = {
+            "CANO": self.account_no,
+            "ACNT_PRDT_CD": self.product_code,
+            "OVRS_EXCG_CD": "NASD",
+            "SORT_SQN": "DS",
+            "CTX_AREA_FK200": "",
+            "CTX_AREA_NK200": ""
+        }
+        
+        return self.api_call(endpoint, tr_id, params)
     
     def is_market_open(self) -> bool:
-        """시장 오픈 여부 확인"""
+        """시장 오픈 여부 확인 (간단한 시간 체크)"""
         try:
-            clock = self.api.get_clock()
-            return clock.is_open
+            now = datetime.now()
+            current_time = now.strftime("%H:%M")
+            
+            # 한국 시간 기준 미국 시장 시간 (대략적)
+            if "23:30" <= current_time <= "23:59" or "00:00" <= current_time <= "06:00":
+                return True
+            return False
+            
         except Exception as e:
-            log_error("MARKET_STATUS_CHECK_FAILED", "Failed to check market status", e)
+            logger.error(f"Market status check failed: {e}")
             return False
 
 
 class OpenAIClient:
-    """OpenAI GPT API 클라이언트"""
+    """OpenAI GPT API 클라이언트 (최신 API 사용)"""
     
     def __init__(self):
-        openai.api_key = OPENAI_API_KEY
+        self.client = OpenAI(api_key=OPENAI_API_KEY)
         logger.info("OpenAI API client initialized")
     
     @retry_on_failure(max_retries=3, delay=2.0)
     def analyze_signal(self, prompt: str) -> Dict:
         """GPT를 사용한 시그널 분석"""
         try:
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model=GPT_CONFIG["model"],
                 messages=[
                     {"role": "system", "content": "당신은 전문적인 주식 분석가입니다. 데이터를 기반으로 객관적인 분석을 제공하세요."},
@@ -168,7 +362,8 @@ class OpenAIClient:
                 return {
                     "signal_score": 5,
                     "reasoning": content,
-                    "action": "HOLD"
+                    "action": "HOLD",
+                    "confidence": "MEDIUM"
                 }
                 
         except Exception as e:
@@ -179,7 +374,7 @@ class OpenAIClient:
     def analyze_entry_signal(self, symbol: str, market_data: Dict) -> Dict:
         """매수 시그널 분석"""
         prompt = f"""
-        다음 주식 데이터를 분석하여 매수 시점인지 판단해주세요:
+        다음 미국 주식 데이터를 분석하여 매수 시점인지 판단해주세요:
         
         종목: {symbol}
         현재가: ${market_data.get('current_price', 0):.2f}
@@ -198,7 +393,8 @@ class OpenAIClient:
         답변 형식: {{
             "signal_score": 점수,
             "reasoning": "분석 근거",
-            "action": "BUY/HOLD/SELL"
+            "action": "BUY/HOLD/SELL",
+            "confidence": "HIGH/MEDIUM/LOW"
         }}
         """
         
@@ -225,7 +421,8 @@ class OpenAIClient:
         답변 형식: {{
             "exit_score": 점수,
             "reasoning": "분석 근거",
-            "action": "HOLD/SELL"
+            "action": "HOLD/SELL",
+            "confidence": "HIGH/MEDIUM/LOW"
         }}
         """
         
@@ -233,15 +430,19 @@ class OpenAIClient:
 
 
 # 전역 클라이언트 인스턴스
-alpaca_client = AlpacaClient()
+kis_client = KISAPIClient()
 openai_client = OpenAIClient()
 
 
-def get_alpaca_client() -> AlpacaClient:
-    """Alpaca 클라이언트 인스턴스 반환"""
-    return alpaca_client
+def get_kis_client() -> KISAPIClient:
+    """KIS API 클라이언트 인스턴스 반환"""
+    return kis_client
 
 
 def get_openai_client() -> OpenAIClient:
     """OpenAI 클라이언트 인스턴스 반환"""
     return openai_client
+
+
+# 호환성을 위한 별명
+get_alpaca_client = get_kis_client

@@ -12,7 +12,7 @@ import pandas as pd
 
 from config.config import GPT_PROMPTS, SCALPING_CONFIG
 from utils.logger import get_logger, log_signal, log_error
-from utils.api_client import get_alpaca_client, get_openai_client
+from utils.api_client import get_kis_client, get_openai_client
 from screener.stock_screener import get_stock_screener
 
 logger = get_logger()
@@ -22,7 +22,7 @@ class MarketDataAnalyzer:
     """시장 데이터 분석 클래스"""
     
     def __init__(self):
-        self.alpaca_client = get_alpaca_client()
+        self.kis_client = get_kis_client()
         self.openai_client = get_openai_client()
         self.stock_screener = get_stock_screener()
         
@@ -37,37 +37,32 @@ class MarketDataAnalyzer:
             # 기본 시장 데이터 수집
             base_data = self.stock_screener.get_detailed_analysis(symbol)
             
-            # Alpaca API에서 추가 데이터 수집
-            latest_quotes = self.alpaca_client.get_latest_quotes([symbol])
-            latest_trades = self.alpaca_client.get_latest_trades([symbol])
-            latest_bars = self.alpaca_client.get_latest_bars([symbol], "1Min")
+            # 한국투자 API에서 해외주식 현재가 조회
+            price_result = self.kis_client.get_overseas_stock_price(symbol, "NASD")
             
-            # 호가 데이터 처리
-            quote_data = latest_quotes.get(symbol, {})
-            bid_price = quote_data.get('bid_price', 0)
-            ask_price = quote_data.get('ask_price', 0)
-            bid_size = quote_data.get('bid_size', 0)
-            ask_size = quote_data.get('ask_size', 0)
-            
-            # 체결 데이터 처리
-            trade_data = latest_trades.get(symbol, {})
-            last_price = trade_data.get('price', base_data.get('current_price', 0))
-            last_size = trade_data.get('size', 0)
-            
-            # 호가 스프레드 계산
-            bid_ask_spread = (ask_price - bid_price) / last_price if last_price > 0 else 0
-            
-            # 체결강도 계산 (매수량 vs 매도량 비율)
-            volume_intensity = self.calculate_volume_intensity(symbol)
-            
-            # 1분봉 데이터 처리
-            bar_data = latest_bars.get(symbol, {})
-            if isinstance(bar_data, dict) and 'volume' in bar_data:
-                volume_1m = bar_data['volume']
-                volume_5m = self.get_5min_volume(symbol)
+            # 현재가 데이터 처리
+            if price_result and price_result.get('rt_cd') == '0':
+                output = price_result.get('output', {})
+                
+                last_price = float(output.get('last', base_data.get('current_price', 0)))
+                bid_price = float(output.get('bid', 0))
+                ask_price = float(output.get('ask', 0))
+                volume = int(output.get('tvol', 0))
+                
+                # 호가 스프레드 계산
+                bid_ask_spread = (ask_price - bid_price) / last_price if last_price > 0 else 0
+                
+                # 체결강도 계산 (간단한 추정)
+                volume_intensity = self.calculate_volume_intensity(symbol, output)
+                
             else:
-                volume_1m = last_size
-                volume_5m = volume_1m * 5  # 추정치
+                # API 호출 실패 시 기본값 사용
+                last_price = base_data.get('current_price', 0)
+                bid_price = last_price * 0.999  # 추정값
+                ask_price = last_price * 1.001  # 추정값
+                volume = base_data.get('volume', 0)
+                bid_ask_spread = 0.002  # 기본 스프레드
+                volume_intensity = 50  # 중립
             
             # 통합 시장 데이터 생성
             market_data = {
@@ -75,13 +70,11 @@ class MarketDataAnalyzer:
                 'current_price': last_price,
                 'bid_price': bid_price,
                 'ask_price': ask_price,
-                'bid_size': bid_size,
-                'ask_size': ask_size,
                 'bid_ask_spread': bid_ask_spread,
                 'volume_intensity': volume_intensity,
-                'volume_1m': volume_1m,
-                'volume_5m': volume_5m,
-                'last_trade_size': last_size,
+                'volume_1m': volume // 10,  # 1분 추정 거래량
+                'volume_5m': volume // 2,   # 5분 추정 거래량
+                'daily_volume': volume,
                 'timestamp': datetime.now().isoformat(),
             }
             
@@ -91,23 +84,30 @@ class MarketDataAnalyzer:
             log_error("MARKET_DATA_COLLECTION_ERROR", f"Failed to collect market data for {symbol}", e)
             return {}
     
-    def calculate_volume_intensity(self, symbol: str) -> float:
+    def calculate_volume_intensity(self, symbol: str, price_data: Dict) -> float:
         """체결강도 계산 (매수세 vs 매도세)"""
         try:
-            # 최근 거래 데이터를 기반으로 체결강도 계산
-            # 실제로는 tick 데이터가 필요하지만, 여기서는 간단한 추정치 사용
+            # 한국투자 API의 실시간 데이터를 기반으로 체결강도 추정
             
-            # 호가 데이터 가져오기
-            quotes = self.alpaca_client.get_latest_quotes([symbol])
-            quote_data = quotes.get(symbol, {})
+            # 현재가와 시가 비교로 매수세 추정
+            current_price = float(price_data.get('last', 0))
+            open_price = float(price_data.get('open', current_price))
             
-            bid_size = quote_data.get('bid_size', 0)
-            ask_size = quote_data.get('ask_size', 0)
-            
-            # 매수세 vs 매도세 비율
-            total_size = bid_size + ask_size
-            if total_size > 0:
-                intensity = (bid_size / total_size) * 100
+            if open_price > 0:
+                price_change_ratio = (current_price - open_price) / open_price
+                
+                # 가격 상승률 기반 체결강도 계산
+                if price_change_ratio > 0.02:  # 2% 이상 상승
+                    intensity = 75 + (price_change_ratio * 500)  # 강한 매수세
+                elif price_change_ratio > 0:
+                    intensity = 50 + (price_change_ratio * 1000)  # 약한 매수세
+                elif price_change_ratio < -0.02:  # 2% 이상 하락
+                    intensity = 25 + (price_change_ratio * 500)  # 강한 매도세
+                else:
+                    intensity = 50 + (price_change_ratio * 1000)  # 약한 매도세
+                
+                # 0-100 범위로 제한
+                intensity = max(0, min(100, intensity))
             else:
                 intensity = 50  # 중립
             
@@ -116,22 +116,6 @@ class MarketDataAnalyzer:
         except Exception as e:
             log_error("VOLUME_INTENSITY_ERROR", f"Failed to calculate volume intensity for {symbol}", e)
             return 50
-    
-    def get_5min_volume(self, symbol: str) -> int:
-        """5분간 거래량 계산"""
-        try:
-            # 5분 바 데이터 가져오기
-            bars = self.alpaca_client.get_latest_bars([symbol], "5Min")
-            bar_data = bars.get(symbol, {})
-            
-            if isinstance(bar_data, dict) and 'volume' in bar_data:
-                return bar_data['volume']
-            else:
-                return 0
-                
-        except Exception as e:
-            log_error("5MIN_VOLUME_ERROR", f"Failed to get 5min volume for {symbol}", e)
-            return 0
     
     def analyze_entry_signal(self, symbol: str) -> Dict:
         """매수 시그널 분석"""

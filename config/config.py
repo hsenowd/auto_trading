@@ -1,6 +1,6 @@
 """
 환경 설정 파일
-미국 주식 초단타 스캘핑 자동매매 시스템의 모든 설정을 관리합니다.
+한국투자 Open API 기반 미국 주식 초단타 스캘핑 자동매매 시스템의 모든 설정을 관리합니다.
 """
 
 import os
@@ -9,19 +9,38 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # =============================================================================
-# API 설정
+# 한국투자 Open API 설정
 # =============================================================================
 
-# Alpaca Trading API (미국 주식 거래)
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "")
-ALPACA_BASE_URL = "https://paper-api.alpaca.markets"  # 실제 거래시 https://api.alpaca.markets
+# 한국투자 API 설정
+KIS_CONFIG = {
+    # 실전투자 앱키/앱시크리트
+    "app_key": os.getenv("KIS_APP_KEY", ""),
+    "app_secret": os.getenv("KIS_APP_SECRET", ""),
+    
+    # 모의투자 앱키/앱시크리트 (테스트용)
+    "paper_app_key": os.getenv("KIS_PAPER_APP_KEY", ""),
+    "paper_app_secret": os.getenv("KIS_PAPER_APP_SECRET", ""),
+    
+    # 계좌 정보
+    "account_no": os.getenv("KIS_ACCOUNT_NO", ""),  # 계좌번호 8자리
+    "product_code": os.getenv("KIS_PRODUCT_CODE", "01"),  # 계좌상품코드 (01: 주식, 03: 선물옵션)
+    
+    # 서버 URL
+    "prod_url": "https://openapi.koreainvestment.com:9443",  # 실전투자
+    "vps_url": "https://openapivts.koreainvestment.com:29443",  # 모의투자
+    
+    # 기본 설정
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    "is_paper_trading": True,  # 모의투자 여부 (실전투자 시 False)
+    "token_file_path": "config/kis_token.yaml",  # 토큰 저장 경로
+}
 
 # OpenAI GPT API (실시간 분석)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # =============================================================================
-# 거래 설정
+# 거래 설정 (한국투자 미국주식 기준)
 # =============================================================================
 
 # 스캘핑 전략 설정
@@ -36,8 +55,8 @@ SCALPING_CONFIG = {
 # 급등주 스크리닝 조건
 SCREENING_CONFIG = {
     "min_volume": 1000000,       # 최소 거래량
-    "min_price": 5.0,            # 최소 주가
-    "max_price": 500.0,          # 최대 주가
+    "min_price": 5.0,            # 최소 주가 (USD)
+    "max_price": 500.0,          # 최대 주가 (USD)
     "gap_threshold": 0.03,       # 갭 상승 임계값 (3%)
     "volume_spike": 2.0,         # 거래량 급증 배수
 }
@@ -47,7 +66,7 @@ SCREENING_CONFIG = {
 # =============================================================================
 
 GPT_CONFIG = {
-    "model": "gpt-4-turbo-preview",
+    "model": "gpt-4-turbo",
     "temperature": 0.3,
     "max_tokens": 1000,
     "timeout": 30,
@@ -56,7 +75,7 @@ GPT_CONFIG = {
 # GPT 분석 프롬프트 템플릿
 GPT_PROMPTS = {
     "entry_signal": """
-    다음 주식 데이터를 분석하여 매수 시점인지 판단해주세요:
+    다음 미국 주식 데이터를 분석하여 매수 시점인지 판단해주세요:
     
     종목: {symbol}
     현재가: ${current_price}
@@ -75,7 +94,8 @@ GPT_PROMPTS = {
     답변 형식: {{
         "signal_score": 점수,
         "reasoning": "분석 근거",
-        "action": "BUY/HOLD/SELL"
+        "action": "BUY/HOLD/SELL",
+        "confidence": "HIGH/MEDIUM/LOW"
     }}
     """,
     
@@ -97,7 +117,8 @@ GPT_PROMPTS = {
     답변 형식: {{
         "exit_score": 점수,
         "reasoning": "분석 근거",
-        "action": "HOLD/SELL"
+        "action": "HOLD/SELL",
+        "confidence": "HIGH/MEDIUM/LOW"
     }}
     """
 }
@@ -122,21 +143,22 @@ SLACK_CONFIG = {
 }
 
 # =============================================================================
-# 거래 시간 설정
+# 미국 주식 거래 시간 설정 (한국 시간 기준)
 # =============================================================================
 
-# 미국 주식 거래 시간 (ET)
+# 미국 주식 거래 시간 (한국 시간 기준)
 TRADING_HOURS = {
-    "market_open": "09:30",
-    "market_close": "16:00",
-    "pre_market_start": "04:00",
-    "after_market_end": "20:00",
+    # 동부 표준시 (EST) 기준
+    "market_open": "23:30",    # 09:30 EST = 23:30 KST
+    "market_close": "06:00",   # 16:00 EST = 06:00 KST (다음날)
+    "pre_market_start": "18:00",  # 04:00 EST = 18:00 KST
+    "after_market_end": "10:00",  # 20:00 EST = 10:00 KST (다음날)
 }
 
-# 스캘핑 활성 시간 (변동성이 높은 시간대)
+# 스캘핑 활성 시간 (변동성이 높은 시간대, 한국 시간 기준)
 SCALPING_ACTIVE_HOURS = [
-    ("09:30", "10:30"),  # 장 시작 1시간
-    ("14:00", "16:00"),  # 장 마감 2시간
+    ("23:30", "00:30"),  # 장 시작 1시간
+    ("04:00", "06:00"),  # 장 마감 2시간
 ]
 
 # =============================================================================
