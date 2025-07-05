@@ -22,6 +22,9 @@ from config.config import (
 from utils.logger import get_logger
 from utils.api_client import get_kis_client
 from utils.telegram_notifier import get_telegram_notifier
+from utils.paper_trading_simulator import get_paper_trader
+from utils.hybrid_validator import get_hybrid_validator
+from utils.gradual_deployment import get_deployment_manager
 from screener.stock_screener import get_stock_screener
 from analyzer.gpt_analyzer import get_market_analyzer
 from trader.scalping_trader import get_scalping_trader
@@ -40,10 +43,18 @@ class ScalpingSystem:
         self.scalping_trader = get_scalping_trader()
         self.telegram_notifier = get_telegram_notifier()
         
+        # 📊 새로운 대안 솔루션들
+        self.paper_trader = get_paper_trader()
+        self.hybrid_validator = get_hybrid_validator()
+        self.deployment_manager = get_deployment_manager()
+        
         # 시스템 상태
         self.system_running = False
         self.trading_active = False
         self.current_session = "CLOSED"
+        
+        # 거래 모드 설정 (모의투자 API 한계 극복)
+        self.trading_mode = "paper_simulation"  # paper_simulation, real_api
         
         # 미국 휴장일 확인
         self.us_holidays = holidays.UnitedStates(years=datetime.now().year)
@@ -52,12 +63,26 @@ class ScalpingSystem:
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
         
-        logger.info("ScalpingSystem initialized")
+        logger.info("ScalpingSystem initialized with hybrid validation system")
         
         # 시스템 시작 알림
+        current_config = self.deployment_manager.get_current_config()
+        current_stage = self.deployment_manager.current_stage.value
+        
         self.telegram_notifier.send_system_alert(
             "SYSTEM_INIT", 
-            "한국투자 API 기반 스캘핑 시스템이 초기화되었습니다.", 
+            f"""한국투자 API 기반 스캘핑 시스템이 초기화되었습니다.
+
+🔧 현재 배포 단계: {current_stage}
+💰 최대 포지션 크기: ${current_config.get('max_position_size', 0)}
+🎯 최대 포지션 수: {current_config.get('max_positions', 0)}
+
+🛡️ 모의투자 API 한계 극복 솔루션:
+• 페이퍼 트레이딩 시뮬레이터 활성화
+• 하이브리드 검증 시스템 준비
+• 단계별 실전 전환 관리
+
+거래 모드: {self.trading_mode}""", 
             "INFO"
         )
     
