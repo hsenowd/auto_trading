@@ -1,0 +1,8 @@
+2025-07-05 16:16:25 | INFO | kis_api | KIS API Standards initialized
+2025-07-05 16:16:25 | INFO | kis_api | API Debugger initialized (Level: INFO)
+2025-07-05 16:17:32 | INFO | kis_api | KIS API Standards initialized
+2025-07-05 16:17:32 | INFO | kis_api | API Debugger initialized (Level: INFO)
+2025-07-05 16:17:32 | DEBUG | kis_api | Created standardized request for OVERSEAS_STOCK_PRICE
+2025-07-05 16:17:32 | DEBUG | kis_api | Created standardized request for OVERSEAS_STOCK_PRICE
+2025-07-05 16:17:32 | ERROR | kis_api | [API_REQUEST_CREATE_ERROR] Failed to create request for TRCode.OVERSEAS_STOCK_PRICE | Exception: Missing required parameters for OVERSEAS_STOCK_PRICE: ['EXCD']
+2025-07-05 16:17:32 | DEBUG | kis_api | Parsed response for OVERSEAS_STOCK_PRICE

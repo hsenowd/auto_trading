@@ -16,9 +16,22 @@ from datetime import datetime, timedelta
 from collections import namedtuple
 from openai import OpenAI
 import os
+import threading
 
 from config.config import KIS_CONFIG, OPENAI_API_KEY, GPT_CONFIG
-from utils.logger import get_logger, log_error
+from utils.simple_logger import get_logger, log_error
+from utils.kis_api_standards import (
+    get_kis_standards, 
+    TRCode, 
+    MarketCode, 
+    OrderSide, 
+    APIRequest, 
+    APIResponse,
+    create_stock_price_request,
+    create_order_request, 
+    create_balance_request
+)
+from utils.api_debugger import get_api_debugger, LogLevel
 
 logger = get_logger()
 
@@ -43,290 +56,375 @@ def retry_on_failure(max_retries: int = 3, delay: float = 1.0):
 
 
 class KISAPIClient:
-    """한국투자 Open API 클라이언트"""
+    """한국투자 Open API 클라이언트 (표준화 적용)"""
     
     def __init__(self):
         self.config = KIS_CONFIG
+        self.standards = get_kis_standards()
         self.base_url = self.config["vps_url"] if self.config["is_paper_trading"] else self.config["prod_url"]
-        self.app_key = self.config["paper_app_key"] if self.config["is_paper_trading"] else self.config["app_key"]
-        self.app_secret = self.config["paper_app_secret"] if self.config["is_paper_trading"] else self.config["app_secret"]
-        self.account_no = self.config["account_no"]
-        self.product_code = self.config["product_code"]
-        
-        # 토큰 관리
         self.token = None
-        self.token_expired = None
-        self.last_auth_time = None
+        self.token_expires = None
+        self.lock = threading.Lock()
         
-        # 기본 헤더
-        self.base_headers = {
-            "Content-Type": "application/json",
-            "Accept": "text/plain",
-            "charset": "UTF-8",
-            "User-Agent": self.config["user_agent"]
-        }
+        logger.info(f"KIS API Client initialized (Mode: {'Paper' if self.config['is_paper_trading'] else 'Live'})")
+    
+    def _is_token_valid(self) -> bool:
+        """토큰 유효성 확인"""
+        if not self.token or not self.token_expires:
+            return False
         
-        logger.info("KIS API client initialized")
+        # 토큰 만료 10분 전에 재발급
+        now = datetime.now()
+        expiry_buffer = self.token_expires - timedelta(minutes=10)
+        
+        return now < expiry_buffer
     
-    def save_token(self, token: str, expired: str):
-        """토큰을 파일에 저장"""
-        try:
-            valid_date = datetime.strptime(expired, '%Y-%m-%d %H:%M:%S')
-            token_data = {
-                'token': token,
-                'valid-date': valid_date
-            }
-            
-            os.makedirs(os.path.dirname(self.config["token_file_path"]), exist_ok=True)
-            with open(self.config["token_file_path"], 'w', encoding='utf-8') as f:
-                yaml.dump(token_data, f, default_flow_style=False, allow_unicode=True)
-                
-        except Exception as e:
-            logger.error(f"Failed to save token: {e}")
-    
-    def read_token(self) -> Optional[str]:
-        """저장된 토큰 읽기"""
-        try:
-            if not os.path.exists(self.config["token_file_path"]):
-                return None
-            
-            with open(self.config["token_file_path"], encoding='UTF-8') as f:
-                token_data = yaml.load(f, Loader=yaml.FullLoader)
-            
-            if not token_data:
-                return None
-                
-            # 토큰 만료 시간 확인
-            exp_dt = datetime.strftime(token_data['valid-date'], '%Y-%m-%d %H:%M:%S')
-            now_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            if exp_dt > now_dt:
-                return token_data['token']
-            else:
-                return None
-                
-        except Exception as e:
-            logger.error(f"Failed to read token: {e}")
-            return None
-    
-    @retry_on_failure(max_retries=3, delay=1.0)
     def authenticate(self) -> bool:
-        """토큰 발급 및 인증"""
+        """토큰 발급/갱신 (표준화 적용)"""
         try:
-            # 기존 토큰 확인
-            saved_token = self.read_token()
-            if saved_token:
-                self.token = saved_token
-                self.setup_headers()
-                logger.info("Using saved token")
-                return True
-            
-            # 새 토큰 발급
-            url = f"{self.base_url}/oauth2/tokenP"
-            data = {
-                "grant_type": "client_credentials",
-                "appkey": self.app_key,
-                "appsecret": self.app_secret
-            }
-            
-            response = requests.post(url, data=json.dumps(data), headers=self.base_headers)
-            
-            if response.status_code == 200:
-                result = response.json()
-                self.token = result['access_token']
-                self.token_expired = result['access_token_token_expired']
+            with self.lock:
+                # 기존 토큰 유효성 확인
+                if self._is_token_valid():
+                    return True
                 
-                # 토큰 저장
-                self.save_token(self.token, self.token_expired)
+                # 표준화된 인증 요청
+                auth_data = {
+                    "grant_type": "client_credentials",
+                    "appkey": self.config["app_key"],
+                    "appsecret": self.config["app_secret"]
+                }
                 
-                # 헤더 설정
-                self.setup_headers()
+                url = f"{self.base_url}{TRCode.OAUTH_TOKEN.value}"
                 
-                self.last_auth_time = datetime.now()
-                logger.info("Token authentication successful")
-                return True
-            else:
-                logger.error(f"Token authentication failed: {response.status_code}")
-                return False
+                response = requests.post(
+                    url,
+                    json=auth_data,
+                    headers={"content-type": "application/json"},
+                    timeout=30
+                )
                 
+                if response.status_code == 200:
+                    data = response.json()
+                    self.token = data.get("access_token")
+                    
+                    # 토큰 만료 시간 설정 (24시간)
+                    self.token_expires = datetime.now() + timedelta(hours=24)
+                    
+                    logger.info("🔑 KIS API authentication successful")
+                    return True
+                else:
+                    log_error("AUTH_ERROR", f"Authentication failed: {response.status_code}", 
+                             Exception(response.text))
+                    return False
+                    
         except Exception as e:
-            logger.error(f"Authentication error: {e}")
+            log_error("AUTH_EXCEPTION", "Authentication exception occurred", e)
             return False
     
-    def setup_headers(self):
-        """인증 헤더 설정"""
-        self.base_headers["authorization"] = f"Bearer {self.token}"
-        self.base_headers["appkey"] = self.app_key
-        self.base_headers["appsecret"] = self.app_secret
-    
-    def get_hashkey(self, params: Dict) -> str:
-        """해시키 생성"""
+    def get_overseas_stock_price(self, symbol: str, market: str = "NAS") -> Optional[Dict]:
+        """해외주식 현재가 조회 (표준화 적용)"""
         try:
-            url = f"{self.base_url}/uapi/hashkey"
-            headers = copy.deepcopy(self.base_headers)
+            if not self.authenticate():
+                return None
             
-            response = requests.post(url, data=json.dumps(params), headers=headers)
-            
-            if response.status_code == 200:
-                return response.json()['HASH']
-            else:
-                logger.error(f"Failed to get hashkey: {response.status_code}")
-                return ""
-                
-        except Exception as e:
-            logger.error(f"Hashkey generation error: {e}")
-            return ""
-    
-    def api_call(self, endpoint: str, tr_id: str, params: Optional[Dict] = None, method: str = "GET") -> Dict:
-        """API 호출 공통 메서드"""
-        try:
-            # 인증 확인
-            if not self.token:
-                if not self.authenticate():
-                    raise Exception("Authentication failed")
-            
-            url = f"{self.base_url}{endpoint}"
-            headers = copy.deepcopy(self.base_headers)
-            
-            # TR ID 설정 (모의투자일 경우 변환)
-            if tr_id[0] in ('T', 'J', 'C') and self.config["is_paper_trading"]:
-                tr_id = 'V' + tr_id[1:]
-            
-            headers["tr_id"] = tr_id
-            headers["custtype"] = "P"
+            # 표준화된 요청 생성
+            request = create_stock_price_request(symbol, market)
             
             # API 호출
-            if method == "POST":
-                request_data = json.dumps(params) if params else "{}"
-                response = requests.post(url, headers=headers, data=request_data)
+            raw_response = self._make_api_call(request)
+            if not raw_response:
+                return None
+            
+            # 표준화된 응답 파싱
+            response = self.standards.parse_response(TRCode.OVERSEAS_STOCK_PRICE, raw_response)
+            
+            if response.rt_cd == "0" and response.output:
+                stock_info = response.output
+                return {
+                    'symbol': stock_info.symbol,
+                    'name': stock_info.name,
+                    'current_price': stock_info.current_price,
+                    'daily_change': stock_info.daily_change,
+                    'daily_change_rate': stock_info.daily_change_rate,
+                    'volume': stock_info.volume,
+                    'volume_intensity': stock_info.volume / 1000000 if stock_info.volume > 0 else 0,
+                    'high_price': stock_info.high_price,
+                    'low_price': stock_info.low_price,
+                    'open_price': stock_info.open_price,
+                    'prev_close': stock_info.prev_close,
+                    'market': stock_info.market.value
+                }
             else:
-                response = requests.get(url, headers=headers, params=params)
+                logger.warning(f"Stock price query failed: {response.msg1}")
+                return None
+                
+        except Exception as e:
+            log_error("STOCK_PRICE_ERROR", f"Failed to get stock price for {symbol}", e)
+            return None
+    
+    def place_overseas_order(self, symbol: str, quantity: int, price: float, 
+                           side: str = "buy", order_type: str = "limit", 
+                           market: str = "NASD") -> Optional[Dict]:
+        """해외주식 주문 (표준화 적용)"""
+        try:
+            if not self.authenticate():
+                return None
+            
+            # 주문 구분 코드 변환
+            side_code = OrderSide.BUY.value if side.lower() == "buy" else OrderSide.SELL.value
+            
+            # 표준화된 주문 요청 생성
+            request = create_order_request(
+                account_no=self.config["account_no"],
+                symbol=symbol,
+                quantity=quantity,
+                price=price,
+                side=side_code,
+                market=market
+            )
+            
+            # API 호출
+            raw_response = self._make_api_call(request)
+            if not raw_response:
+                return None
+            
+            # 표준화된 응답 파싱
+            response = self.standards.parse_response(TRCode.OVERSEAS_STOCK_ORDER, raw_response)
+            
+            if response.rt_cd == "0" and response.output:
+                order_info = response.output
+                return {
+                    'order_id': order_info.order_id,
+                    'symbol': order_info.symbol,
+                    'side': side,
+                    'quantity': order_info.quantity,
+                    'price': order_info.price,
+                    'status': 'submitted',
+                    'timestamp': order_info.order_time.isoformat()
+                }
+            else:
+                logger.error(f"Order failed: {response.msg1}")
+                return None
+                
+        except Exception as e:
+            log_error("ORDER_ERROR", f"Failed to place order for {symbol}", e)
+            return None
+    
+    def get_overseas_stock_balance(self, market: str = "NASD") -> List[Dict]:
+        """해외주식 잔고조회 (표준화 적용)"""
+        try:
+            if not self.authenticate():
+                return []
+            
+            # 표준화된 잔고 요청 생성
+            request = create_balance_request(
+                account_no=self.config["account_no"],
+                market=market
+            )
+            
+            # API 호출
+            raw_response = self._make_api_call(request)
+            if not raw_response:
+                return []
+            
+            # 표준화된 응답 파싱
+            response = self.standards.parse_response(TRCode.OVERSEAS_STOCK_BALANCE, raw_response)
+            
+            if response.rt_cd == "0" and response.output:
+                balances = []
+                for balance_info in response.output:
+                    if balance_info.quantity > 0:  # 보유 수량이 있는 것만
+                        balances.append({
+                            'symbol': balance_info.symbol,
+                            'name': balance_info.name,
+                            'quantity': balance_info.quantity,
+                            'avg_price': balance_info.avg_price,
+                            'current_price': balance_info.current_price,
+                            'market_value': balance_info.eval_amount,
+                            'unrealized_pnl': balance_info.profit_loss,
+                            'unrealized_pnl_pct': balance_info.profit_loss_rate,
+                            'market': balance_info.market.value
+                        })
+                return balances
+            else:
+                logger.warning(f"Balance query failed: {response.msg1}")
+                return []
+                
+        except Exception as e:
+            log_error("BALANCE_ERROR", "Failed to get stock balance", e)
+            return []
+    
+    def _make_api_call(self, request: APIRequest) -> Optional[Dict]:
+        """표준화된 API 호출 (디버깅 통합)"""
+        debugger = get_api_debugger()
+        call_id = ""
+        start_time = time.time()
+        
+        try:
+            # 헤더에 인증 토큰 추가
+            headers = request.headers.copy()
+            headers["authorization"] = f"Bearer {self.token}"
+            headers["appkey"] = self.config["app_key"]
+            headers["appsecret"] = self.config["app_secret"]
+            
+            # URL 구성
+            url = f"{self.base_url}/uapi/overseas-price/v1/quotations/price"
+            
+            if request.tr_id == TRCode.OVERSEAS_STOCK_ORDER.value:
+                url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
+            elif request.tr_id == TRCode.OVERSEAS_STOCK_BALANCE.value:
+                url = f"{self.base_url}/uapi/overseas-stock/v1/trading/inquire-balance"
+            
+            # 디버깅 시작
+            call_id = debugger.start_api_call(request.tr_id, request, url)
+            
+            # HTTP 요청 실행
+            if request.body:
+                # POST 요청 (주문 등)
+                response = requests.post(
+                    url,
+                    json=request.body,
+                    headers=headers,
+                    params=request.params,
+                    timeout=30
+                )
+            else:
+                # GET 요청 (시세 조회 등)
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    params=request.params,
+                    timeout=30
+                )
+            
+            response_time_ms = (time.time() - start_time) * 1000
+            
+            # 디버깅 종료
+            debugger.end_api_call(
+                call_id=call_id,
+                response_status=response.status_code,
+                response_headers=dict(response.headers),
+                response_body=response.json() if response.status_code == 200 else {},
+                response_time_ms=response_time_ms
+            )
+            
+            # 디버깅 로그
+            logger.debug(f"API Call: {request.tr_id} -> Status: {response.status_code} ({response_time_ms:.1f}ms)")
             
             if response.status_code == 200:
                 return response.json()
             else:
-                logger.error(f"API call failed: {response.status_code}, {response.text}")
-                return {}
+                error_msg = f"HTTP {response.status_code}: {response.text}"
+                log_error("API_CALL_ERROR", f"API call failed: {response.status_code}", 
+                         Exception(error_msg))
+                return None
+                
+        except requests.exceptions.Timeout as e:
+            response_time_ms = (time.time() - start_time) * 1000
+            error_msg = f"Request timeout after 30 seconds"
+            
+            if call_id:
+                debugger.end_api_call(
+                    call_id=call_id,
+                    response_status=408,
+                    response_headers={},
+                    response_body={},
+                    response_time_ms=response_time_ms,
+                    error_message=error_msg
+                )
+            
+            log_error("API_TIMEOUT_ERROR", f"API timeout: {request.tr_id}", e)
+            return None
+            
+        except requests.exceptions.ConnectionError as e:
+            response_time_ms = (time.time() - start_time) * 1000
+            error_msg = f"Connection error: {str(e)}"
+            
+            if call_id:
+                debugger.end_api_call(
+                    call_id=call_id,
+                    response_status=0,
+                    response_headers={},
+                    response_body={},
+                    response_time_ms=response_time_ms,
+                    error_message=error_msg
+                )
+            
+            log_error("API_CONNECTION_ERROR", f"Connection error: {request.tr_id}", e)
+            return None
+            
+        except Exception as e:
+            response_time_ms = (time.time() - start_time) * 1000
+            error_msg = f"Unexpected error: {str(e)}"
+            
+            if call_id:
+                debugger.end_api_call(
+                    call_id=call_id,
+                    response_status=500,
+                    response_headers={},
+                    response_body={},
+                    response_time_ms=response_time_ms,
+                    error_message=error_msg
+                )
+            
+            log_error("API_CALL_EXCEPTION", f"API call exception: {request.tr_id}", e)
+            return None
+    
+    def cancel_overseas_order(self, order_id: str, symbol: str, quantity: int, 
+                            market: str = "NASD") -> bool:
+        """해외주식 주문취소 (표준화 적용)"""
+        try:
+            if not self.authenticate():
+                return False
+            
+            # 표준화된 취소 요청 생성
+            request = self.standards.create_request(
+                TRCode.OVERSEAS_STOCK_ORDER_CANCEL,
+                CANO=self.config["account_no"],
+                ACNT_PRDT_CD="01",
+                OVRS_EXCG_CD=market,
+                PDNO=symbol,
+                ORGN_ODNO=order_id,
+                ORD_QTY=quantity
+            )
+            
+            # API 호출
+            raw_response = self._make_api_call(request)
+            if not raw_response:
+                return False
+            
+            # 응답 파싱
+            response = self.standards.parse_response(TRCode.OVERSEAS_STOCK_ORDER_CANCEL, raw_response)
+            
+            if response.rt_cd == "0":
+                logger.info(f"Order cancelled successfully: {order_id}")
+                return True
+            else:
+                logger.error(f"Order cancellation failed: {response.msg1}")
+                return False
                 
         except Exception as e:
-            logger.error(f"API call error: {e}")
+            log_error("CANCEL_ORDER_ERROR", f"Failed to cancel order {order_id}", e)
+            return False
+    
+    def get_parameter_template(self, tr_code: str) -> Dict:
+        """TR 코드별 파라미터 템플릿 조회"""
+        try:
+            tr_enum = TRCode(tr_code)
+            return self.standards.get_parameter_info(tr_enum)
+        except ValueError:
+            logger.warning(f"Unknown TR code: {tr_code}")
             return {}
     
-    # =============================================================================
-    # 해외주식 관련 API
-    # =============================================================================
-    
-    @retry_on_failure(max_retries=3, delay=1.0)
-    def get_overseas_stock_price(self, symbol: str, exchange: str = "NASD") -> Dict:
-        """해외주식 현재가 조회"""
-        endpoint = "/uapi/overseas-price/v1/quotations/price"
-        tr_id = "HHDFS00000300"
-        
-        params = {
-            "AUTH": "",
-            "EXCD": exchange,  # NASD: 나스닥, NYSE: 뉴욕증권거래소
-            "SYMB": symbol
-        }
-        
-        return self.api_call(endpoint, tr_id, params)
-    
-    @retry_on_failure(max_retries=3, delay=1.0)
-    def get_overseas_stock_balance(self) -> Dict:
-        """해외주식 잔고 조회"""
-        endpoint = "/uapi/overseas-stock/v1/trading/inquire-balance"
-        tr_id = "TTTS3012R"
-        
-        params = {
-            "CANO": self.account_no,
-            "ACNT_PRDT_CD": self.product_code,
-            "OVRS_EXCG_CD": "NASD",  # 나스닥
-            "TR_CRCY_CD": "USD",
-            "CTX_AREA_FK200": "",
-            "CTX_AREA_NK200": ""
-        }
-        
-        return self.api_call(endpoint, tr_id, params)
-    
-    @retry_on_failure(max_retries=3, delay=1.0)
-    def place_overseas_order(self, symbol: str, qty: int, side: str, price: Optional[float] = None, 
-                            exchange: str = "NASD", order_type: str = "00") -> Dict:
-        """해외주식 주문"""
-        endpoint = "/uapi/overseas-stock/v1/trading/order"
-        tr_id = "TTTT1002U"  # 해외주식 주문
-        
-        params = {
-            "CANO": self.account_no,
-            "ACNT_PRDT_CD": self.product_code,
-            "OVRS_EXCG_CD": exchange,
-            "PDNO": symbol,
-            "ORD_QTY": str(qty),
-            "OVRS_ORD_UNPR": str(price) if price is not None else "0",
-            "ORD_SVR_DVSN_CD": "0",
-            "SLL_TYPE": "00" if side == "buy" else "01",
-            "ORD_DVSN": order_type,  # 00: 지정가, 01: 시장가
-            "CTAC_TLNO": "",
-            "MGCO_APTM_ODNO": "",
-            "ORD_SVR_DVSN_CD": "0"
-        }
-        
-        # 해시키 생성
-        hashkey = self.get_hashkey(params)
-        headers = copy.deepcopy(self.base_headers)
-        headers["hashkey"] = hashkey
-        
-        return self.api_call(endpoint, tr_id, params, method="POST")
-    
-    @retry_on_failure(max_retries=3, delay=1.0)
-    def cancel_overseas_order(self, order_id: str, symbol: str, qty: int, exchange: str = "NASD") -> Dict:
-        """해외주식 주문 취소"""
-        endpoint = "/uapi/overseas-stock/v1/trading/order-rvsecncl"
-        tr_id = "TTTT1004U"
-        
-        params = {
-            "CANO": self.account_no,
-            "ACNT_PRDT_CD": self.product_code,
-            "OVRS_EXCG_CD": exchange,
-            "PDNO": symbol,
-            "ORGN_ODNO": order_id,
-            "ORD_QTY": str(qty),
-            "RVSE_CNCL_DVSN_CD": "02",  # 취소
-            "ORD_UNPR": "0",
-            "CTAC_TLNO": "",
-            "MGCO_APTM_ODNO": ""
-        }
-        
-        return self.api_call(endpoint, tr_id, params, method="POST")
-    
-    @retry_on_failure(max_retries=3, delay=1.0)
-    def get_overseas_orders(self) -> Dict:
-        """해외주식 미체결 주문 조회"""
-        endpoint = "/uapi/overseas-stock/v1/trading/inquire-nccs"
-        tr_id = "TTTS3018R"
-        
-        params = {
-            "CANO": self.account_no,
-            "ACNT_PRDT_CD": self.product_code,
-            "OVRS_EXCG_CD": "NASD",
-            "SORT_SQN": "DS",
-            "CTX_AREA_FK200": "",
-            "CTX_AREA_NK200": ""
-        }
-        
-        return self.api_call(endpoint, tr_id, params)
-    
-    def is_market_open(self) -> bool:
-        """시장 오픈 여부 확인 (간단한 시간 체크)"""
+    def validate_request_parameters(self, tr_code: str, **params) -> bool:
+        """요청 파라미터 유효성 검증"""
         try:
-            now = datetime.now()
-            current_time = now.strftime("%H:%M")
-            
-            # 한국 시간 기준 미국 시장 시간 (대략적)
-            if "23:30" <= current_time <= "23:59" or "00:00" <= current_time <= "06:00":
-                return True
-            return False
-            
+            tr_enum = TRCode(tr_code)
+            # 실제 요청 생성을 통해 검증
+            self.standards.create_request(tr_enum, **params)
+            return True
         except Exception as e:
-            logger.error(f"Market status check failed: {e}")
+            logger.warning(f"Parameter validation failed: {e}")
             return False
 
 
